@@ -104,28 +104,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Build Docker image
-        run: docker build -t juice-shop:latest .
+      - name: Pull OWASP Juice Shop image
+        run: docker pull bkimminich/juice-shop:latest
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: "juice-shop:latest"
+          image-ref: "bkimminich/juice-shop:latest"
           format: "json"
           output: "trivy-results.json"
           severity: "CRITICAL,HIGH,MEDIUM"
           ignore-unfixed: true
-        continue-on-error: true
+          continue-on-error: true
 
       - name: Upload container scan results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: container-results
-          path: trivy-results.json
+         name: container-results
+         path: trivy-results.json
 
 
   # =========================================================
