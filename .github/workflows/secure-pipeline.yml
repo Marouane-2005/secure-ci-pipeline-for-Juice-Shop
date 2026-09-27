@@ -200,19 +200,21 @@ jobs:
           exit 1
 
       - name: Prepare ZAP results directory
-        run: mkdir -p zap-results
+        run: |
+          mkdir -p zap-results
+          chmod 777 zap-results
 
       - name: Run OWASP ZAP Baseline Scan
         run: |
           docker run --rm \
-            --network host \
-            -v "${{ github.workspace }}/zap-results:/zap/wrk:rw" \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py \
-            -t http://localhost:3000 \
-            -J zap-report.json \
-            -r zap-report.html \
-            -m 5
+          --network host \
+          -v "${{ github.workspace }}/zap-results:/zap/wrk:rw" \
+          ghcr.io/zaproxy/zaproxy:stable \
+          zap-baseline.py \
+          -t http://localhost:3000 \
+          -J zap-report.json \
+          -r zap-report.html \
+          -m 5
 
       - name: Upload DAST results
         if: always()
