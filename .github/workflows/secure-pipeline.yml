@@ -1,0 +1,99 @@
+name: Secure CI Pipeline (OWASP Juice Shop)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  secret-scan:
+    name: Secret Scanning (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Semgrep
+        run: |
+          semgrep scan --config p/owasp-top-ten --config p/javascript \
+            --json --output semgrep-results.json .
+        continue-on-error: true
+      - name: Upload SAST results
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-results
+          path: semgrep-results.json
+
+  sca:
+    name: SCA (OWASP Dependency-Check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "juice-shop"
+          path: "."
+          format: "JSON"
+          args: >
+            --failOnCVSS 0
+            --enableExperimental
+      - name: Upload SCA results
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-results
+          path: ${{ github.workspace }}/reports/dependency-check-report.json
+
+  container-scan:
+    name: Container Scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t juice-shop:latest .
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "juice-shop:latest"
+          format: "json"
+          output: "trivy-results.json"
+          severity: "CRITICAL,HIGH,MEDIUM"
+          ignore-unfixed: true
+        continue-on-error: true
+      - name: Upload container scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-results
+          path: trivy-results.json
+
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [secret-scan, sast, sca, container-scan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all scan results
+        uses: actions/download-artifact@v4
+        with:
+          path: scan-results
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Evaluate Quality Gate
+        run: python3 quality_gate.py --results-dir scan-results
+      - name: Post summary to PR
+        if: always()
+        run: cat quality_gate_summary.md >> $GITHUB_STEP_SUMMARY
