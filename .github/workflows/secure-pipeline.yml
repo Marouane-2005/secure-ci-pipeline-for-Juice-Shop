@@ -162,3 +162,61 @@ jobs:
           if [ -f quality_gate_summary.md ]; then
             cat quality_gate_summary.md >> $GITHUB_STEP_SUMMARY
           fi
+
+            # =========================================================
+            # 5. DAST
+            # =========================================================
+  dast:
+    name: DAST (OWASP ZAP)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pull OWASP Juice Shop image
+        run: docker pull bkimminich/juice-shop:latest
+
+      - name: Start OWASP Juice Shop
+        run: |
+          docker run -d \
+            --name juice-shop \
+            -p 3000:3000 \
+            bkimminich/juice-shop:latest
+
+      - name: Wait for Juice Shop
+        run: |
+          echo "Waiting for Juice Shop..."
+
+          for i in {1..30}; do
+            if curl -fs http://localhost:3000 > /dev/null; then
+              echo "Juice Shop is ready."
+              exit 0
+            fi
+
+            echo "Attempt $i/30..."
+            sleep 2
+          done
+
+          echo "Juice Shop failed to start."
+          docker logs juice-shop
+          exit 1
+
+      - name: Prepare ZAP results directory
+        run: mkdir -p zap-results
+
+      - name: Run OWASP ZAP Baseline Scan
+        run: |
+          docker run --rm \
+            --network host \
+            -v "${{ github.workspace }}/zap-results:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://localhost:3000 \
+            -J zap-report.json \
+            -r zap-report.html \
+            -m 5
+
+      - name: Upload DAST results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-results
+          path: zap-results/
