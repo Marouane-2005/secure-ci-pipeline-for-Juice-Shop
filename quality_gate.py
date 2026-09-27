@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 """
 Quality Gate — agrège les résultats de :
