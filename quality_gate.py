@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
+
 """
 Quality Gate — agrège les résultats de :
+- Semgrep
+- OWASP Dependency-Check
+- Trivy
+- OWASP ZAP
 
-- Gitleaks (Secret Scanning)
-- Semgrep (SAST)
-- OWASP Dependency-Check (SCA)
-- Trivy (Container Security)
-- OWASP ZAP (DAST)
-
-Puis décide si le build doit passer ou échouer selon les seuils
-de sévérité définis.
+Puis décide si le build passe ou échoue selon les seuils définis.
 
 Usage:
     python3 quality_gate.py --results-dir scan-results
@@ -21,10 +19,10 @@ import sys
 from pathlib import Path
 
 
-# ----------------------------------------------------------------------
-# Seuils configurables
-# ----------------------------------------------------------------------
-# Nombre maximum de vulnérabilités tolérées par sévérité.
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
 THRESHOLDS = {
     "CRITICAL": 0,
     "HIGH": 2,
@@ -40,13 +38,13 @@ SEVERITY_ORDER = [
 ]
 
 
-# ----------------------------------------------------------------------
-# Utilitaires
-# ----------------------------------------------------------------------
+# =========================================================
+# UTILITAIRES
+# =========================================================
+
 def find_file(results_dir: Path, filename: str):
     """
-    Cherche un fichier de résultat dans results_dir,
-    y compris dans les sous-dossiers des artifacts GitHub Actions.
+    Recherche récursivement un fichier dans le dossier des résultats.
     """
     matches = list(results_dir.rglob(filename))
 
@@ -58,11 +56,13 @@ def find_file(results_dir: Path, filename: str):
 
 def safe_json_load(path: Path):
     """
-    Charge un fichier JSON de manière sécurisée.
-    Retourne None si le fichier est invalide.
+    Charge un fichier JSON sans faire planter brutalement le Quality Gate.
     """
     try:
         return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"[ERROR] Fichier introuvable: {path}")
+        return None
     except json.JSONDecodeError as exc:
         print(f"[ERROR] JSON invalide dans {path}: {exc}")
         return None
@@ -71,21 +71,34 @@ def safe_json_load(path: Path):
         return None
 
 
-# ----------------------------------------------------------------------
-# SAST — Semgrep
-# ----------------------------------------------------------------------
-def parse_semgrep(results_dir: Path, counts: dict, findings: list):
-    """Parse les résultats Semgrep (SAST)."""
+# =========================================================
+# SAST — SEMGREP
+# =========================================================
 
-    f = find_file(results_dir, "semgrep-results.json")
+def parse_semgrep(
+    results_dir: Path,
+    counts: dict,
+    findings: list,
+):
+    """
+    Analyse les résultats JSON de Semgrep.
+    """
 
-    if not f or not f.exists():
-        print("[SAST] Aucun résultat Semgrep trouvé, étape ignorée.")
+    path = find_file(
+        results_dir,
+        "semgrep-results.json",
+    )
+
+    if not path:
+        print(
+            "[SAST] Aucun résultat Semgrep trouvé, "
+            "étape ignorée."
+        )
         return
 
-    data = safe_json_load(f)
+    data = safe_json_load(path)
 
-    if data is None:
+    if not data:
         return
 
     severity_map = {
@@ -96,268 +109,349 @@ def parse_semgrep(results_dir: Path, counts: dict, findings: list):
 
     for result in data.get("results", []):
 
-        raw_sev = (
+        raw_severity = (
             result
             .get("extra", {})
             .get("severity", "INFO")
             .upper()
         )
 
-        sev = severity_map.get(raw_sev, "LOW")
+        severity = severity_map.get(
+            raw_severity,
+            "LOW",
+        )
 
-        counts[sev] += 1
+        counts[severity] += 1
 
-        findings.append({
-            "source": "SAST (Semgrep)",
-            "severity": sev,
-            "detail": result.get(
-                "check_id",
-                "unknown-rule"
-            ),
-            "location": result.get(
-                "path",
-                "?"
-            ),
-        })
+        findings.append(
+            {
+                "source": "SAST (Semgrep)",
+                "severity": severity,
+                "detail": result.get(
+                    "check_id",
+                    "unknown-rule",
+                ),
+                "location": result.get(
+                    "path",
+                    "?",
+                ),
+            }
+        )
 
 
-# ----------------------------------------------------------------------
-# SCA — OWASP Dependency-Check
-# ----------------------------------------------------------------------
+# =========================================================
+# SCA — OWASP DEPENDENCY-CHECK
+# =========================================================
+
 def parse_dependency_check(
     results_dir: Path,
     counts: dict,
     findings: list,
 ):
-    """Parse les résultats OWASP Dependency-Check (SCA / CVE)."""
+    """
+    Analyse les résultats JSON de OWASP Dependency-Check.
+    """
 
-    f = find_file(
+    path = find_file(
         results_dir,
         "dependency-check-report.json",
     )
 
-    if not f or not f.exists():
+    if not path:
         print(
-            "[SCA] Aucun résultat Dependency-Check trouvé, "
-            "étape ignorée."
+            "[SCA] Aucun résultat Dependency-Check "
+            "trouvé, étape ignorée."
         )
         return
 
-    data = safe_json_load(f)
+    data = safe_json_load(path)
 
-    if data is None:
+    if not data:
         return
 
-    for dependency in data.get("dependencies", []):
+    for dependency in data.get(
+        "dependencies",
+        [],
+    ):
 
-        for vuln in dependency.get(
-            "vulnerabilities",
-            [],
-        ) or []:
+        vulnerabilities = (
+            dependency.get(
+                "vulnerabilities",
+                [],
+            )
+            or []
+        )
+
+        for vulnerability in vulnerabilities:
 
             cvss = (
-                vuln
+                vulnerability
                 .get("cvssv3", {})
                 .get("baseScore")
             )
 
             if cvss is None:
                 cvss = (
-                    vuln
+                    vulnerability
                     .get("cvssv2", {})
                     .get("score", 0)
                 )
 
-            sev = cvss_to_severity(cvss)
+            severity = cvss_to_severity(
+                cvss
+            )
 
-            counts[sev] += 1
+            counts[severity] += 1
 
-            findings.append({
-                "source": "SCA (Dependency-Check)",
-                "severity": sev,
-                "detail": vuln.get(
-                    "name",
-                    "unknown-cve"
-                ),
-                "location": dependency.get(
-                    "fileName",
-                    "?"
-                ),
-            })
+            findings.append(
+                {
+                    "source": (
+                        "SCA "
+                        "(Dependency-Check)"
+                    ),
+                    "severity": severity,
+                    "detail": vulnerability.get(
+                        "name",
+                        "unknown-cve",
+                    ),
+                    "location": dependency.get(
+                        "fileName",
+                        "?",
+                    ),
+                }
+            )
 
 
-# ----------------------------------------------------------------------
-# Container Security — Trivy
-# ----------------------------------------------------------------------
+# =========================================================
+# CONTAINER — TRIVY
+# =========================================================
+
 def parse_trivy(
     results_dir: Path,
     counts: dict,
     findings: list,
 ):
-    """Parse les résultats Trivy (Container Security)."""
+    """
+    Analyse les résultats JSON de Trivy.
+    """
 
-    f = find_file(
+    path = find_file(
         results_dir,
         "trivy-results.json",
     )
 
-    if not f or not f.exists():
+    if not path:
         print(
-            "[Container] Aucun résultat Trivy trouvé, "
-            "étape ignorée."
+            "[Container] Aucun résultat Trivy "
+            "trouvé, étape ignorée."
         )
         return
 
-    data = safe_json_load(f)
+    data = safe_json_load(path)
 
-    if data is None:
+    if not data:
         return
 
-    for result in data.get("Results", []):
+    for result in data.get(
+        "Results",
+        [],
+    ):
 
-        for vuln in result.get(
-            "Vulnerabilities",
-            [],
-        ) or []:
+        vulnerabilities = (
+            result.get(
+                "Vulnerabilities",
+                [],
+            )
+            or []
+        )
 
-            sev = vuln.get(
-                "Severity",
-                "LOW",
-            ).upper()
+        for vulnerability in vulnerabilities:
 
-            if sev not in counts:
-                sev = "LOW"
+            severity = (
+                vulnerability
+                .get("Severity", "LOW")
+                .upper()
+            )
 
-            counts[sev] += 1
+            if severity not in counts:
+                severity = "LOW"
 
-            findings.append({
-                "source": "Container (Trivy)",
-                "severity": sev,
-                "detail": vuln.get(
-                    "VulnerabilityID",
-                    "unknown-cve",
-                ),
-                "location": vuln.get(
-                    "PkgName",
-                    "?",
-                ),
-            })
+            counts[severity] += 1
+
+            findings.append(
+                {
+                    "source": (
+                        "Container (Trivy)"
+                    ),
+                    "severity": severity,
+                    "detail": vulnerability.get(
+                        "VulnerabilityID",
+                        "unknown-cve",
+                    ),
+                    "location": vulnerability.get(
+                        "PkgName",
+                        "?",
+                    ),
+                }
+            )
 
 
-# ----------------------------------------------------------------------
+# =========================================================
 # DAST — OWASP ZAP
-# ----------------------------------------------------------------------
+# =========================================================
+
+def zap_risk_to_severity(riskcode):
+    """
+    Convertit le riskcode officiel présent dans
+    le rapport JSON de ZAP.
+
+    ZAP:
+        3 = High
+        2 = Medium
+        1 = Low
+        0 = Informational
+    """
+
+    try:
+        risk = int(riskcode)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+    mapping = {
+        3: "HIGH",
+        2: "MEDIUM",
+        1: "LOW",
+        0: None,
+    }
+
+    return mapping.get(risk)
+
+
 def parse_zap(
     results_dir: Path,
     counts: dict,
     findings: list,
 ):
     """
-    Parse les résultats OWASP ZAP (DAST).
+    Analyse le rapport JSON généré par OWASP ZAP.
 
-    ZAP peut générer un rapport JSON contenant :
+    Le rapport réel de ZAP 2.17.0 utilise :
 
-        site
-          └── alerts
-                ├── riskdesc
-                ├── alert
-                └── url
-
-    Les niveaux ZAP sont convertis vers les catégories
-    utilisées par le Quality Gate :
-
-        High   -> HIGH
-        Medium -> MEDIUM
-        Low    -> LOW
-
-    Les alertes Informational sont ignorées.
+        site[]
+            alerts[]
+                riskcode
+                alert/name
+                instances[]
     """
 
-    f = find_file(
+    path = find_file(
         results_dir,
         "zap-report.json",
     )
 
-    if not f or not f.exists():
+    if not path:
         print(
-            "[DAST] Aucun résultat OWASP ZAP trouvé, "
+            "[DAST] Aucun résultat ZAP trouvé, "
             "étape ignorée."
         )
         return
 
-    data = safe_json_load(f)
+    data = safe_json_load(path)
 
-    if data is None:
+    if not data:
         return
 
-    total_alerts = 0
+    alert_count = 0
+    ignored_count = 0
 
-    # Format standard du rapport JSON ZAP
-    for site in data.get("site", []):
+    for site in data.get(
+        "site",
+        [],
+    ):
 
-        for alert in site.get("alerts", []):
+        for alert in site.get(
+            "alerts",
+            [],
+        ):
 
-            total_alerts += 1
-
-            riskdesc = (
-                alert
-                .get("riskdesc", "")
-                .upper()
+            severity = zap_risk_to_severity(
+                alert.get("riskcode")
             )
 
-            # ------------------------------------------------------
-            # Conversion de la sévérité ZAP
-            # ------------------------------------------------------
-            if "HIGH" in riskdesc:
-                sev = "HIGH"
-
-            elif "MEDIUM" in riskdesc:
-                sev = "MEDIUM"
-
-            elif "LOW" in riskdesc:
-                sev = "LOW"
-
-            else:
-                # Informational / Unknown
+            # Les alertes informatives ZAP
+            # ne sont pas comptabilisées.
+            if severity is None:
+                ignored_count += 1
                 continue
 
-            counts[sev] += 1
+            alert_count += 1
+            counts[severity] += 1
 
-            findings.append({
-                "source": "DAST (OWASP ZAP)",
-                "severity": sev,
-                "detail": alert.get(
-                    "alert",
-                    alert.get(
-                        "name",
-                        "unknown-alert",
-                    ),
-                ),
-                "location": alert.get(
-                    "url",
+            instances = alert.get(
+                "instances",
+                [],
+            )
+
+            if instances:
+                first_instance = instances[0]
+
+                location = first_instance.get(
+                    "uri",
                     site.get(
                         "@name",
                         "?",
                     ),
-                ),
-            })
+                )
+            else:
+                location = site.get(
+                    "@name",
+                    "?",
+                )
+
+            findings.append(
+                {
+                    "source": (
+                        "DAST "
+                        "(OWASP ZAP)"
+                    ),
+                    "severity": severity,
+                    "detail": (
+                        f"{alert.get('alert', 'unknown-alert')} "
+                        f"[{alert.get('pluginid', '?')}]"
+                    ),
+                    "location": location,
+                }
+            )
 
     print(
-        f"[DAST] OWASP ZAP : "
-        f"{total_alerts} alerte(s) analysée(s)."
+        f"[DAST] {alert_count} alertes "
+        f"de sécurité comptabilisées."
+    )
+
+    print(
+        f"[DAST] {ignored_count} alertes "
+        f"informationnelles ignorées."
     )
 
 
-# ----------------------------------------------------------------------
-# CVSS -> Severity
-# ----------------------------------------------------------------------
-def cvss_to_severity(score: float) -> str:
-    """Convertit un score CVSS en catégorie de sévérité."""
+# =========================================================
+# CVSS
+# =========================================================
+
+def cvss_to_severity(score) -> str:
+    """
+    Convertit un score CVSS en sévérité.
+    """
 
     try:
         score = float(score)
-
-    except (TypeError, ValueError):
+    except (
+        TypeError,
+        ValueError,
+    ):
         return "LOW"
 
     if score >= 9.0:
@@ -372,106 +466,75 @@ def cvss_to_severity(score: float) -> str:
     return "LOW"
 
 
-# ----------------------------------------------------------------------
-# Quality Gate Evaluation
-# ----------------------------------------------------------------------
+# =========================================================
+# QUALITY GATE
+# =========================================================
+
 def evaluate(counts: dict) -> bool:
     """
-    Retourne True si le build passe.
-
-    Le build échoue dès qu'un seuil de sévérité est dépassé.
+    Vérifie les seuils globaux.
     """
 
     passed = True
 
-    for sev in SEVERITY_ORDER:
+    for severity in SEVERITY_ORDER:
 
-        if counts[sev] > THRESHOLDS[sev]:
+        if counts[severity] > THRESHOLDS[
+            severity
+        ]:
             passed = False
 
     return passed
 
 
-# ----------------------------------------------------------------------
-# GitHub Actions Summary
-# ----------------------------------------------------------------------
+# =========================================================
+# SUMMARY
+# =========================================================
+
 def write_summary(
     counts: dict,
     findings: list,
     passed: bool,
     out_path: Path,
 ):
-    """Génère le rapport Markdown du Quality Gate."""
+    """
+    Génère le rapport Markdown du Quality Gate.
+    """
 
     lines = [
-        "# 🔒 Quality Gate Report\n"
+        "# 🔒 Quality Gate Report",
+        "",
+        (
+            f"**Result: "
+            f"{'✅ PASSED' if passed else '❌ FAILED'}**"
+        ),
+        "",
+        "## Severity summary",
+        "",
+        "| Severity | Found | Threshold | Status |",
+        "|---|---:|---:|---|",
     ]
 
-    lines.append(
-        f"**Result: "
-        f"{'✅ PASSED' if passed else '❌ FAILED'}**\n"
-    )
-
-    lines.append(
-        "| Severity | Found | Threshold | Status |"
-    )
-
-    lines.append(
-        "|---|---:|---:|---|"
-    )
-
-    for sev in SEVERITY_ORDER:
+    for severity in SEVERITY_ORDER:
 
         status = (
             "✅"
-            if counts[sev] <= THRESHOLDS[sev]
+            if counts[severity]
+            <= THRESHOLDS[severity]
             else "❌"
         )
 
         lines.append(
-            f"| {sev} | "
-            f"{counts[sev]} | "
-            f"{THRESHOLDS[sev]} | "
+            f"| {severity} | "
+            f"{counts[severity]} | "
+            f"{THRESHOLDS[severity]} | "
             f"{status} |"
         )
 
-    # --------------------------------------------------------------
-    # Findings
-    # --------------------------------------------------------------
-    if findings:
+    # -----------------------------------------------------
+    # Findings par scanner
+    # -----------------------------------------------------
 
-        lines.append(
-            "\n## Top findings\n"
-        )
-
-        lines.append(
-            "| Source | Severity | Detail | Location |"
-        )
-
-        lines.append(
-            "|---|---|---|---|"
-        )
-
-        # Les findings les plus sévères en premier
-        sorted_findings = sorted(
-            findings,
-            key=lambda x: SEVERITY_ORDER.index(
-                x["severity"]
-            ),
-        )[:20]
-
-        for item in sorted_findings:
-
-            lines.append(
-                f"| {item['source']} | "
-                f"{item['severity']} | "
-                f"{item['detail']} | "
-                f"{item['location']} |"
-            )
-
-    # --------------------------------------------------------------
-    # Statistics par scanner
-    # --------------------------------------------------------------
     scanner_counts = {}
 
     for finding in findings:
@@ -484,16 +547,14 @@ def write_summary(
 
     if scanner_counts:
 
-        lines.append(
-            "\n## Findings by scanner\n"
-        )
-
-        lines.append(
-            "| Scanner | Findings |"
-        )
-
-        lines.append(
-            "|---|---:|"
+        lines.extend(
+            [
+                "",
+                "## Findings by scanner",
+                "",
+                "| Scanner | Findings |",
+                "|---|---:|",
+            ]
         )
 
         for source, count in sorted(
@@ -503,20 +564,71 @@ def write_summary(
                 f"| {source} | {count} |"
             )
 
-    # --------------------------------------------------------------
-    # Write report
-    # --------------------------------------------------------------
+    # -----------------------------------------------------
+    # Top findings
+    # -----------------------------------------------------
+
+    if findings:
+
+        lines.extend(
+            [
+                "",
+                "## Top findings",
+                "",
+                "| Source | Severity | Detail | Location |",
+                "|---|---|---|---|",
+            ]
+        )
+
+        sorted_findings = sorted(
+            findings,
+            key=lambda item: (
+                SEVERITY_ORDER.index(
+                    item["severity"]
+                ),
+                item["source"],
+            ),
+        )
+
+        for item in sorted_findings[:20]:
+
+            # Nettoyage minimal pour éviter
+            # de casser le tableau Markdown.
+            detail = str(
+                item["detail"]
+            ).replace(
+                "|",
+                "\\|",
+            )
+
+            location = str(
+                item["location"]
+            ).replace(
+                "|",
+                "\\|",
+            )
+
+            lines.append(
+                f"| {item['source']} | "
+                f"{item['severity']} | "
+                f"{detail} | "
+                f"{location} |"
+            )
+
+    output = "\n".join(lines) + "\n"
+
     out_path.write_text(
-        "\n".join(lines),
+        output,
         encoding="utf-8",
     )
 
-    print("\n".join(lines))
+    print(output)
 
 
-# ----------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------
+# =========================================================
+# MAIN
+# =========================================================
+
 def main():
 
     parser = argparse.ArgumentParser(
@@ -529,34 +641,31 @@ def main():
         "--results-dir",
         required=True,
         type=Path,
-        help="Directory containing scanner results",
+        help=(
+            "Directory containing scanner "
+            "results"
+        ),
     )
 
     args = parser.parse_args()
 
     if not args.results_dir.exists():
-
         print(
-            f"[ERROR] Results directory not found: "
-            f"{args.results_dir}"
+            f"[ERROR] Results directory "
+            f"not found: {args.results_dir}"
         )
-
         sys.exit(1)
 
-    # --------------------------------------------------------------
-    # Initialize counters
-    # --------------------------------------------------------------
     counts = {
-        sev: 0
-        for sev in SEVERITY_ORDER
+        severity: 0
+        for severity in SEVERITY_ORDER
     }
 
     findings = []
 
-    # --------------------------------------------------------------
-    # Parse scanner reports
-    # --------------------------------------------------------------
-    print("\n🔎 Parsing security scan results...\n")
+    # -----------------------------------------------------
+    # Parse scanner results
+    # -----------------------------------------------------
 
     parse_semgrep(
         args.results_dir,
@@ -582,24 +691,29 @@ def main():
         findings,
     )
 
-    # --------------------------------------------------------------
-    # Evaluate Quality Gate
-    # --------------------------------------------------------------
+    # -----------------------------------------------------
+    # Evaluate
+    # -----------------------------------------------------
+
     passed = evaluate(counts)
 
-    # --------------------------------------------------------------
+    # -----------------------------------------------------
     # Generate summary
-    # --------------------------------------------------------------
+    # -----------------------------------------------------
+
     write_summary(
         counts,
         findings,
         passed,
-        Path("quality_gate_summary.md"),
+        Path(
+            "quality_gate_summary.md"
+        ),
     )
 
-    # --------------------------------------------------------------
+    # -----------------------------------------------------
     # Exit code
-    # --------------------------------------------------------------
+    # -----------------------------------------------------
+
     if not passed:
 
         print(
