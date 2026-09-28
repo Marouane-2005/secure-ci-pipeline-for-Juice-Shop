@@ -19,6 +19,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Contournement : le script "sbom" du frontend cherche un stats.json que
+      # le builder Angular actuel ne genere plus. Le SBOM n'est pas utilise par
+      # nos scans, on le rend donc non bloquant (ng build reste bloquant).
+      # Modification faite uniquement dans le workspace CI, non commitee.
+      - name: Make frontend SBOM step non-blocking (workaround)
+        run: |
+          sed -i 's#&& npm run sbom#\&\& (npm run sbom || echo SBOM-skipped)#' frontend/package.json
+          grep -q 'SBOM-skipped' frontend/package.json || { echo "Patch non applique: verifier frontend/package.json"; exit 1; }
+          grep '"build"' frontend/package.json
+
       - name: Build Docker image
         run: docker build -t juice-shop-fork:latest .
 
