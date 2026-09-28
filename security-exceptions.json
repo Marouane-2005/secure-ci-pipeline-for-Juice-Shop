@@ -1,0 +1,17 @@
+{
+  "_comment": "Risques acceptes et documentes. Chaque entree DOIT avoir 'match', 'reason' et 'expires'. Une entree expiree est ignoree par le Quality Gate (le finding redevient bloquant).",
+  "exceptions": [
+    {
+      "match": "marsdb",
+      "reason": "Aucun correctif upstream disponible (npm audit). Composant utilise par le code des defis NoSQL de Juice Shop. A verifier dans SOLUTIONS.md avant de conserver cette exception.",
+      "owner": "Marouane CHTITA",
+      "expires": "2027-03-31"
+    },
+    {
+      "match": "notevil",
+      "reason": "Aucun correctif upstream disponible (npm audit). Composant utilise par un defi d'evaluation de code de Juice Shop. A verifier dans SOLUTIONS.md avant de conserver cette exception.",
+      "owner": "Marouane CHTITA",
+      "expires": "2027-03-31"
+    }
+  ]
+}
